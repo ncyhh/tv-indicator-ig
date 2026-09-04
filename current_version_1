@@ -1,0 +1,89 @@
+//@version=6
+indicator("Quant Decision Engine - Clean UI", overlay = true, max_labels_count = 1)
+
+grp_markov = "Markov Regime Settings"
+markov_len  = input.int(20, "Markov Lookback (Days)", minval = 1, group = grp_markov)
+bull_thresh = input.float(5.0, "Bull State Threshold (%)", group = grp_markov)
+bear_thresh = input.float(-5.0, "Bear State Threshold (%)", group = grp_markov)
+
+grp_risk = "Risk Geometry"
+atr_len  = input.int(14, "ATR Length", group = grp_risk)
+atr_mult = input.float(1.5, "SL Multiplier (ATR)", group = grp_risk)
+rr_ratio = input.float(2.5, "Risk-to-Reward Ratio", group = grp_risk)
+
+float price_change = (close - close[markov_len]) / close[markov_len] * 100
+bool is_bull_state = price_change >= bull_thresh
+bool is_bear_state = price_change <= bear_thresh
+
+float fair_price = request.security(syminfo.tickerid, "D", open, lookahead = barmerge.lookahead_on)
+bool is_undervalued = close < fair_price
+bool is_overvalued  = close > fair_price
+
+float rsi_val = ta.rsi(close, 14)
+bool vol_spike = volume > ta.sma(volume, 20)
+
+int buy_score  = 0
+int sell_score = 0
+int total_metrics = 3
+
+buy_score  += (is_bull_state ? 1 : 0)
+buy_score  += (is_undervalued ? 1 : 0)
+buy_score  += (rsi_val < 60 and vol_spike ? 1 : 0)
+
+sell_score += (is_bear_state ? 1 : 0)
+sell_score += (is_overvalued ? 1 : 0)
+sell_score += (rsi_val > 40 and vol_spike ? 1 : 0)
+
+string signal = "HOLD"
+float confidence = 0.0
+
+if buy_score > sell_score and buy_score > 0
+    signal := "BUY"
+    confidence := (buy_score / float(total_metrics)) * 100
+else if sell_score > buy_score and sell_score > 0
+    signal := "SELL"
+    confidence := (sell_score / float(total_metrics)) * 100
+
+color signal_color = signal == "BUY" ? color.green : signal == "SELL" ? color.red : color.gray
+
+float atr = ta.atr(atr_len)
+float sl_dist = atr * atr_mult
+float tp_dist = sl_dist * rr_ratio
+
+var float sl_price = na
+var float tp_price = na
+
+if signal != "HOLD"
+    sl_price := signal == "BUY" ? close - sl_dist : close + sl_dist
+    tp_price := signal == "BUY" ? close + tp_dist : close - tp_dist
+
+plot(sl_price, "Stop Loss", color.new(color.red, 30), 2, plot.style_linebr)
+plot(tp_price, "Take Profit", color.new(color.green, 30), 2, plot.style_linebr)
+
+var table info_table = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 70), border_width = 1, border_color = color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "SIGNAL", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 0, signal, text_color = signal_color, text_halign = text.align_right)
+    table.cell(info_table, 0, 1, "CONFIDENCE", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 1, str.format("{0,number,#}%", confidence), text_color = color.white, text_halign = text.align_right)
+    table.cell(info_table, 0, 2, "REGIME", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 2, is_bull_state ? "BULL" : is_bear_state ? "BEAR" : "SIDEWAYS", text_color = color.white, text_halign = text.align_right)
+    table.cell(info_table, 0, 3, "RSI (14)", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 3, str.tostring(math.round(rsi_val, 2)), text_color = color.white, text_halign = text.align_right)
+    table.cell(info_table, 0, 4, "SL PRICE", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 4, str.tostring(sl_price, format.mintick), text_color = color.red, text_halign = text.align_right)
+    table.cell(info_table, 0, 5, "TP PRICE", text_color = color.white, text_halign = text.align_left)
+    table.cell(info_table, 1, 5, str.tostring(tp_price, format.mintick), text_color = color.green, text_halign = text.align_right)
+    
+var label signal_label = na
+if barstate.islast
+    label.delete(signal_label) // Delete outdated labels to keep only the latest one
+    
+    // Using label.style_label_center removes the directional arrow
+    signal_label := label.new(bar_index, (signal == "BUY" ? low : high), signal, 
+         yloc = (signal == "BUY" ? yloc.belowbar : yloc.abovebar), 
+         color = signal_color, 
+         textcolor = color.white, 
+         style = label.style_label_center, 
+         size = size.normal)
