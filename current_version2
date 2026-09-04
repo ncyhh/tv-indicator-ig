@@ -1,0 +1,158 @@
+//@version=6
+indicator("Markov 2.0 Hedge Fund Method", overlay=true)
+
+// ==========================================
+// 1. INPUTS & PARAMETERS
+// ==========================================
+lookbackReturn  = input.int(20, title="Regime Lookback (Bars)", minval=1, group="Markov Parameters")
+bullThreshold   = input.float(0.05, title="Bull Threshold (+5%)", step=0.01, group="Markov Parameters")
+bearThreshold   = input.float(-0.05, title="Bear Threshold (-5%)", step=0.01, group="Markov Parameters")
+useFable5       = input.bool(true, title="Use Fable 5 Non-Overlapping Sampling (Unbiased)", group="Markov Parameters")
+
+showTable       = input.bool(true, title="Show Matrix Dashboard", group="Display Settings")
+tablePosition   = input.string("Top Right", title="Table Position", options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group="Display Settings")
+bgOpacity       = input.int(85, title="Background Highlight Opacity", minval=0, maxval=100, group="Display Settings")
+
+// Threshold to decide when Signal Delta is weak enough to trigger a HOLD recommendation
+neutralZone     = input.float(0.05, title="Hold/Neutral Delta Zone (+/-)", step=0.01, group="Strategy Rules")
+
+// ==========================================
+// 2. REGIME CLASSIFICATION (STATE DECOMPOSITION)
+// ==========================================
+ret = (close - close[lookbackReturn]) / close[lookbackReturn]
+
+int currentState = na
+if not na(ret)
+    if ret > bullThreshold
+        currentState := 0
+    else if ret < bearThreshold
+        currentState := 2
+    else
+        currentState := 1
+
+// ==========================================
+// 3. MATRIX TALLYING & TRANSITION LOGIC
+// ==========================================
+var int[] transitionCounts = array.new_int(9, 0)
+var int[] stateOccurrences = array.new_int(3, 0)
+
+int stepWindow = useFable5 ? lookbackReturn : 1
+
+bool isTransitionBar = (bar_index % stepWindow == 0) and not na(currentState) and not na(currentState[stepWindow])
+
+if isTransitionBar
+    int prevState = currentState[stepWindow]
+    int currState = currentState
+    int cellIndex = prevState * 3 + currState
+    
+    array.set(transitionCounts, cellIndex, array.get(transitionCounts, cellIndex) + 1)
+    array.set(stateOccurrences, prevState, array.get(stateOccurrences, prevState) + 1)
+
+// ==========================================
+// 4. TRANSITION PROBABILITIES & SIGNAL CALCULATION
+// ==========================================
+float pBull = 0.333
+float pSideways = 0.333
+float pBear = 0.333
+
+if not na(currentState)
+    int row = currentState
+    int countTotal = array.get(stateOccurrences, row)
+    
+    if countTotal > 0
+        pBull     := array.get(transitionCounts, row * 3 + 0) / float(countTotal)
+        pSideways := array.get(transitionCounts, row * 3 + 1) / float(countTotal)
+        pBear     := array.get(transitionCounts, row * 3 + 2) / float(countTotal)
+
+float markovSignal = pBull - pBear
+
+f_get_prob(int r, int c) =>
+    int tot = array.get(stateOccurrences, r)
+    tot > 0 ? array.get(transitionCounts, r * 3 + c) / float(tot) : 0.3333
+
+float lrBull = (f_get_prob(0,0) + f_get_prob(1,0) + f_get_prob(2,0)) / 3.0
+float lrSide = (f_get_prob(0,1) + f_get_prob(1,1) + f_get_prob(2,1)) / 3.0
+float lrBear = (f_get_prob(0,2) + f_get_prob(1,2) + f_get_prob(2,2)) / 3.0
+
+// Determine Signal: BUY, SELL, or HOLD based on Markov Signal Delta
+string actionSignal = markovSignal > neutralZone ? "BUY" : markovSignal < -neutralZone ? "SELL" : "HOLD"
+color actionColor   = actionSignal == "BUY" ? color.green : actionSignal == "SELL" ? color.red : color.gray
+
+// ==========================================
+// 5. CHART VISUALIZATION & HIGHLIGHTS
+// ==========================================
+color stateBgColor = currentState == 0 ? color.new(color.green, bgOpacity) : currentState == 2 ? color.new(color.red, bgOpacity) : color.new(color.gray, bgOpacity)
+bgcolor(stateBgColor, title="Regime Background")
+
+plot(markovSignal, title="Markov Confidence Delta Signal", color=markovSignal > 0 ? color.green : color.red, display=display.data_window)
+
+// Render dynamic label directly above the current/newest candlestick
+var label currentCandleLabel = na
+if barstate.islast
+    label.delete(currentCandleLabel) // Keep only the latest label updated
+    currentCandleLabel := label.new(
+         x=bar_index,
+         y=high,
+         text=actionSignal,
+         style=label.style_label_down,
+         color=actionColor,
+         textcolor=color.white,
+         size=size.normal
+     )
+
+// ==========================================
+// 6. ON-CHART MATRIX DASHBOARD TABLE
+// ==========================================
+get_position(string pos) =>
+    switch pos
+        "Top Right"    => position.top_right
+        "Bottom Right" => position.bottom_right
+        "Top Left"     => position.top_left
+        => position.bottom_left
+
+var table matrixTable = table.new(get_position(tablePosition), 5, 7, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+if barstate.islast and showTable
+    // Header Row
+    table.cell(matrixTable, 0, 0, "Markov 2.0 Matrix", bgcolor=color.blue, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 1, 0, "Tomorrow: Bull", bgcolor=color.orange, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 2, 0, "Tomorrow: Side", bgcolor=color.orange, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 3, 0, "Tomorrow: Bear", bgcolor=color.orange, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 4, 0, "Long-Run Mix", bgcolor=color.purple, text_color=color.white, text_size=size.small)
+
+    // State Row Labels
+    table.cell(matrixTable, 0, 1, "Today: Bull", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 0, 2, "Today: Side", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 0, 3, "Today: Bear", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+
+    // Populate Matrix
+    for r = 0 to 2
+        for c = 0 to 2
+            float p = f_get_prob(r, c)
+            bool isCurrentRow = (currentState == r)
+            color cellColor = isCurrentRow ? color.new(color.yellow, 80) : color.new(color.gray, 90)
+            color textColor = isCurrentRow ? color.yellow : color.white
+            table.cell(matrixTable, c + 1, r + 1, str.format("{0,number,#.##}%", p * 100), bgcolor=cellColor, text_color=textColor, text_size=size.small)
+
+    // Long Run Mix Column
+    table.cell(matrixTable, 4, 1, str.format("{0,number,#.##}%", lrBull * 100), bgcolor=color.new(color.purple, 80), text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 4, 2, str.format("{0,number,#.##}%", lrSide * 100), bgcolor=color.new(color.purple, 80), text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 4, 3, str.format("{0,number,#.##}%", lrBear * 100), bgcolor=color.new(color.purple, 80), text_color=color.white, text_size=size.small)
+
+    // Matrix Summary Row
+    string stateText = currentState == 0 ? "BULL" : currentState == 2 ? "BEAR" : "SIDEWAYS"
+    color stateColor = currentState == 0 ? color.green : currentState == 2 ? color.red : color.gray
+    string signalStr = (markovSignal > 0 ? "+" : "") + str.tostring(markovSignal, "#.##")
+
+    table.cell(matrixTable, 0, 4, "Current State", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 1, 4, stateText, bgcolor=stateColor, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 2, 4, "Signal Delta", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 3, 4, signalStr, bgcolor=markovSignal > 0 ? color.green : color.red, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 4, 4, markovSignal > 0 ? "LONG" : "SHORT", bgcolor=markovSignal > 0 ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+    // NEW: Action Recommendation Row (Bottom Row of Table)
+    table.cell(matrixTable, 0, 5, "Recommendation", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 1, 5, actionSignal, bgcolor=actionColor, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 2, 5, "Bias:", bgcolor=color.navy, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 3, 5, actionSignal == "BUY" ? "Bullish" : actionSignal == "SELL" ? "Bearish" : "Neutral", bgcolor=actionColor, text_color=color.white, text_size=size.small)
+    table.cell(matrixTable, 4, 5, actionSignal, bgcolor=actionColor, text_color=color.white, text_size=size.small)
